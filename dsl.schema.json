@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://excali-ft/dsl.schema.json",
+  "title": "Excalidraw Diagram DSL",
+  "description": "Compact, semantic-only description of a diagram. Carries planning decisions (what exists, what connects, what type). All geometry, sizing, IDs, colors, and Excalidraw format fields are computed deterministically by the converter and MUST NOT appear here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["diagram", "title", "nodes"],
+  "properties": {
+    "diagram": {
+      "description": "Selects the converter strategy and default layout.",
+      "type": "string",
+      "enum": [
+        "system_architecture",
+        "flowchart",
+        "er_diagram",
+        "sequence_diagram",
+        "data_pipeline",
+        "timeline",
+        "mind_map",
+        "mobile_wireframe"
+      ]
+    },
+    "title": {
+      "description": "Human-readable diagram title, rendered as a heading text element.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "direction": {
+      "description": "Primary flow/layout direction. Optional; the converter applies a per-diagram default when omitted (e.g. TB for flowchart, LR for architecture, radial for mind_map).",
+      "type": "string",
+      "enum": ["LR", "RL", "TB", "BT", "radial"]
+    },
+    "nodes": {
+      "description": "The boxes/entities/participants/milestones. Internal `id`s are reference handles only and are never rendered.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 40,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "description": "Connections between nodes. For sequence_diagram, array order is message order. May be empty (e.g. some timelines/mind maps without explicit links).",
+      "type": "array",
+      "maxItems": 80,
+      "items": { "$ref": "#/$defs/edge" },
+      "default": []
+    },
+    "groups": {
+      "description": "Optional clusters/swimlanes/screens. A node joins a group via node.group = group.id.",
+      "type": "array",
+      "maxItems": 12,
+      "items": { "$ref": "#/$defs/group" },
+      "default": []
+    },
+    "meta": {
+      "description": "Diagram-level escape hatch for type-specific knobs. Keep empty unless a type below defines a key.",
+      "type": "object",
+      "additionalProperties": true,
+      "default": {}
+    }
+  },
+
+  "$defs": {
+    "id": {
+      "description": "Stable snake_case identifier, unique within its collection. Reference handle only — not rendered.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "minLength": 1,
+      "maxLength": 40
+    },
+    "label": {
+      "description": "Visible text. Non-empty, single line preferred.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60
+    },
+    "role": {
+      "description": "Semantic kind of the node. The converter maps role -> {shape, fill color, stroke color}. The model never picks shapes or colors directly.",
+      "type": "string",
+      "enum": [
+        "actor",
+        "client",
+        "service",
+        "gateway",
+        "database",
+        "cache",
+        "queue",
+        "worker",
+        "storage",
+        "external",
+        "monitoring",
+        "auth",
+        "start",
+        "end",
+        "process",
+        "decision",
+        "io",
+        "source",
+        "transform",
+        "sink",
+        "entity",
+        "participant",
+        "milestone",
+        "root",
+        "branch",
+        "leaf",
+        "screen",
+        "ui_element",
+        "component",
+        "generic"
+      ]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "role"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "label": { "$ref": "#/$defs/label" },
+        "role": { "$ref": "#/$defs/role" },
+        "group": {
+          "description": "Optional group membership; must equal some groups[].id.",
+          "$ref": "#/$defs/id"
+        },
+        "color": {
+          "description": "OPTIONAL explicit override only when a human would intentionally choose a color (e.g. emphasis). Otherwise omit and let the converter derive color from role.",
+          "type": "string",
+          "enum": ["red", "orange", "yellow", "green", "blue", "violet", "gray", "black"]
+        },
+        "meta": {
+          "description": "Type-specific node data. See per-diagram rules in DSL_SPEC.md. Examples: er_diagram fields, timeline date, wireframe ui kind.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fields": {
+              "description": "er_diagram only: entity columns.",
+              "type": "array",
+              "maxItems": 20,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1, "maxLength": 40 },
+                  "type": { "type": "string", "maxLength": 30 },
+                  "key": { "type": "string", "enum": ["pk", "fk", "none"], "default": "none" }
+                }
+              }
+            },
+            "date": {
+              "description": "timeline only: ISO-ish date or short label used for ordering and display.",
+              "type": "string",
+              "maxLength": 30
+            },
+            "kind": {
+              "description": "mobile_wireframe only: the UI element kind.",
+              "type": "string",
+              "enum": ["header", "nav", "text", "input", "button", "list", "image", "card", "tab", "footer"]
+            }
+          }
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": {
+          "description": "Source node id. Must reference an existing node.",
+          "$ref": "#/$defs/id"
+        },
+        "to": {
+          "description": "Target node id. Must reference an existing node.",
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "description": "Optional edge label. For flowchart decision branches use 'yes'/'no'.",
+          "type": "string",
+          "maxLength": 40
+        },
+        "style": {
+          "description": "Line style. Default solid.",
+          "type": "string",
+          "enum": ["solid", "dashed", "dotted"],
+          "default": "solid"
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cardinality": {
+              "description": "er_diagram only: relationship cardinality.",
+              "type": "string",
+              "enum": ["1:1", "1:N", "N:1", "N:M"]
+            },
+            "kind": {
+              "description": "sequence_diagram only: message kind.",
+              "type": "string",
+              "enum": ["sync", "async", "return"],
+              "default": "sync"
+            }
+          }
+        }
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "label": { "$ref": "#/$defs/label" }
+      }
+    }
+  },
+
+  "allOf": [
+    {
+      "description": "ER diagrams: relationships should carry cardinality.",
+      "if": { "properties": { "diagram": { "const": "er_diagram" } } },
+      "then": {
+        "properties": {
+          "edges": {
+            "items": {
+              "properties": {
+                "meta": { "required": ["cardinality"] }
+              },
+              "required": ["meta"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "Timelines: every milestone node should carry a date.",
+      "if": { "properties": { "diagram": { "const": "timeline" } } },
+      "then": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "properties": {
+                "meta": { "required": ["date"] }
+              },
+              "required": ["meta"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "Mobile wireframes: every node needs a UI kind.",
+      "if": { "properties": { "diagram": { "const": "mobile_wireframe" } } },
+      "then": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "properties": {
+                "meta": { "required": ["kind"] }
+              },
+              "required": ["meta"]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
