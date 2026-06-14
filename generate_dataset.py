@@ -97,8 +97,8 @@ PROVIDERS = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "key_env": "OPENROUTER_API_KEY",
-        "flash": "deepseek/deepseek-chat",
-        "pro": "deepseek/deepseek-r1",
+        "flash": "deepseek/deepseek-v4-flash",
+        "pro": "deepseek/deepseek-v4-pro",
         "extra_headers": {"HTTP-Referer": "https://localhost/excali-ft",
                           "X-Title": "excali-ft dataset gen"},
     },
@@ -542,16 +542,29 @@ def run(args, log=lambda m: print(m, file=sys.stderr)):
         f.write(json.dumps(row) + "\n")
         stats["val" if to_val else "train"] += 1
 
+    total_specs = len(specs)
+    log(f"generating prompt->DSL rows for {total_specs} specs (serial API calls)...")
+
+    def _tok():
+        if args.provider == "none":
+            return ""
+        u = gen.client.usage
+        return f" | {u['calls']} calls, {u['prompt_tokens'] + u['completion_tokens']} tok"
+
     try:
         # 3. main prompt->DSL rows
         for i, spec in enumerate(specs):
+            n = i + 1
             try:
                 out = gen.generate(spec)
             except LLMError as e:
-                log(f"  spec {i}: LLM error: {e}")
+                log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
+                    f"-> LLM ERROR: {e}")
                 stats["failed"] += 1
                 continue
             if out is None:
+                log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
+                    f"-> FAILED (invalid after retries){_tok()}")
                 stats["failed"] += 1
                 continue
             user_request, dsl, source = out
@@ -559,13 +572,16 @@ def run(args, log=lambda m: print(m, file=sys.stderr)):
                 stats["fallback"] += 1
             if dedup.is_dup(user_request, dsl):
                 stats["dup"] += 1
+                log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
+                    f"-> dup, skipped{_tok()}")
                 continue
             to_val = _is_holdout(spec["pattern"], spec["domain"],
                                  holdout_patterns, holdout_domains)
             write(_make_row(user_request, dsl), to_val)
             valid_dsls.append((dsl, spec["pattern"], spec["domain"]))
-            if (i + 1) % 50 == 0:
-                log(f"  ...{i + 1}/{len(specs)} specs processed")
+            dest = "val" if to_val else "train"
+            log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
+                f"-> {dest} ({source}){_tok()}")
 
         # 4. edit rows (deterministic). These dedup on their own input (the before-DSL +
         #    instruction), NOT the shared prompt->DSL hash pool — an edit target may
