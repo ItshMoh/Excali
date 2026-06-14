@@ -53,9 +53,11 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from validate_dsl import validate_dsl
 from generate_specs import (
@@ -155,6 +157,7 @@ class LLMClient:
         self.max_retries = max_retries
         self.json_mode = json_mode
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+        self._usage_lock = threading.Lock()  # complete() runs on worker threads
 
     def complete(self, model, system, user):
         payload = {
@@ -181,9 +184,10 @@ class LLMClient:
                     body = json.loads(resp.read().decode("utf-8"))
                 content = body["choices"][0]["message"]["content"]
                 u = body.get("usage", {})
-                self.usage["prompt_tokens"] += u.get("prompt_tokens", 0)
-                self.usage["completion_tokens"] += u.get("completion_tokens", 0)
-                self.usage["calls"] += 1
+                with self._usage_lock:
+                    self.usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+                    self.usage["completion_tokens"] += u.get("completion_tokens", 0)
+                    self.usage["calls"] += 1
                 return content
             except urllib.error.HTTPError as e:
                 code = e.code
@@ -543,7 +547,9 @@ def run(args, log=lambda m: print(m, file=sys.stderr)):
         stats["val" if to_val else "train"] += 1
 
     total_specs = len(specs)
-    log(f"generating prompt->DSL rows for {total_specs} specs (serial API calls)...")
+    workers = 1 if args.provider == "none" else max(1, args.concurrency)
+    log(f"generating prompt->DSL rows for {total_specs} specs "
+        f"(concurrency={workers})...")
 
     def _tok():
         if args.provider == "none":
@@ -551,37 +557,52 @@ def run(args, log=lambda m: print(m, file=sys.stderr)):
         u = gen.client.usage
         return f" | {u['calls']} calls, {u['prompt_tokens'] + u['completion_tokens']} tok"
 
+    def _safe_generate(spec):
+        """Worker body — network call only. Never touches shared state; returns a result
+        tuple so the main thread does all dedup/write/stats lock-free."""
+        try:
+            return ("ok", gen.generate(spec))
+        except LLMError as e:
+            return ("error", str(e))
+
+    def _consume(spec, kind, payload, n):
+        tag = f"{spec['diagram_type']}/{spec['pattern']}"
+        if kind == "error":
+            log(f"  [{n}/{total_specs}] {tag} -> LLM ERROR: {payload}")
+            stats["failed"] += 1
+            return
+        out = payload
+        if out is None:
+            log(f"  [{n}/{total_specs}] {tag} -> FAILED (invalid after retries){_tok()}")
+            stats["failed"] += 1
+            return
+        user_request, dsl, source = out
+        if source == "fallback":
+            stats["fallback"] += 1
+        if dedup.is_dup(user_request, dsl):
+            stats["dup"] += 1
+            log(f"  [{n}/{total_specs}] {tag} -> dup, skipped{_tok()}")
+            return
+        to_val = _is_holdout(spec["pattern"], spec["domain"],
+                             holdout_patterns, holdout_domains)
+        write(_make_row(user_request, dsl), to_val)
+        valid_dsls.append((dsl, spec["pattern"], spec["domain"]))
+        log(f"  [{n}/{total_specs}] {tag} -> {'val' if to_val else 'train'} "
+            f"({source}){_tok()}")
+
     try:
-        # 3. main prompt->DSL rows
-        for i, spec in enumerate(specs):
-            n = i + 1
-            try:
-                out = gen.generate(spec)
-            except LLMError as e:
-                log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
-                    f"-> LLM ERROR: {e}")
-                stats["failed"] += 1
-                continue
-            if out is None:
-                log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
-                    f"-> FAILED (invalid after retries){_tok()}")
-                stats["failed"] += 1
-                continue
-            user_request, dsl, source = out
-            if source == "fallback":
-                stats["fallback"] += 1
-            if dedup.is_dup(user_request, dsl):
-                stats["dup"] += 1
-                log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
-                    f"-> dup, skipped{_tok()}")
-                continue
-            to_val = _is_holdout(spec["pattern"], spec["domain"],
-                                 holdout_patterns, holdout_domains)
-            write(_make_row(user_request, dsl), to_val)
-            valid_dsls.append((dsl, spec["pattern"], spec["domain"]))
-            dest = "val" if to_val else "train"
-            log(f"  [{n}/{total_specs}] {spec['diagram_type']}/{spec['pattern']} "
-                f"-> {dest} ({source}){_tok()}")
+        # 3. main prompt->DSL rows — fan out the API calls, consume on the main thread.
+        if workers == 1:
+            for n, spec in enumerate(specs, 1):
+                kind, payload = _safe_generate(spec)
+                _consume(spec, kind, payload, n)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_safe_generate, spec): spec for spec in specs}
+                for n, fut in enumerate(as_completed(futures), 1):
+                    spec = futures[fut]
+                    kind, payload = fut.result()
+                    _consume(spec, kind, payload, n)
 
         # 4. edit rows (deterministic). These dedup on their own input (the before-DSL +
         #    instruction), NOT the shared prompt->DSL hash pool — an edit target may
@@ -663,6 +684,8 @@ def main(argv=None):
     ap.add_argument("--model-pro", default=None, help="override complex/repair model id")
     ap.add_argument("--pro-for", choices=["high", "none"], default="high",
                     help="use the pro model on high-complexity specs (default) or never")
+    ap.add_argument("--concurrency", type=int, default=5,
+                    help="parallel API calls for prompt->DSL rows (forced to 1 for --provider none)")
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--max-tokens", type=int, default=1500)
     ap.add_argument("--retries", type=int, default=2, help="repair retries per spec on invalid DSL")
