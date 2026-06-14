@@ -265,7 +265,9 @@ def _template_user_request(spec):
 
 def _gen_prompt(spec):
     """The instruction we send to the generator model."""
-    target = {"diagram": spec["diagram_type"], "direction": spec["direction"],
+    target = {"diagram": spec["diagram_type"],
+              "title": f"<short title for a {spec['domain']} diagram>",
+              "direction": spec["direction"],
               "nodes": spec["components"], "edges": spec["edges"], "groups": spec["groups"]}
     return f"""Produce ONE training example for a model that outputs Excalidraw diagram DSL.
 
@@ -276,7 +278,7 @@ Return ONLY a JSON object with two keys:
   "user_request": a natural, specific request a person would type (use the phrasing style
                   "{spec['prompt_style']}"; mention the domain "{spec['domain']}"; do NOT
                   mention ids, roles, or the word DSL).
-  "dsl": the diagram DSL object built from the spec.
+  "dsl": the diagram DSL object built from the spec — it MUST include a short "title".
 
 {SCHEMA_SUMMARY}
 
@@ -286,13 +288,15 @@ Spec:
 
 
 class ModelGenerator:
-    def __init__(self, client, model_flash, model_pro, pro_for, retries, on_fail):
+    def __init__(self, client, model_flash, model_pro, pro_for, retries, on_fail,
+                 log=None):
         self.client = client
         self.model_flash = model_flash
         self.model_pro = model_pro
         self.pro_for = pro_for          # "high" -> use pro on high-complexity specs
         self.retries = retries
         self.on_fail = on_fail          # "skip" | "fallback"
+        self.log = log or (lambda m: None)
 
     def _model_for(self, spec):
         if self.pro_for == "high" and spec.get("complexity") == "high":
@@ -301,9 +305,9 @@ class ModelGenerator:
 
     def generate(self, spec):
         model = self._model_for(spec)
+        tag = f"{spec['diagram_type']}/{spec['pattern']}"
         system, user = "You output only JSON.", _gen_prompt(spec)
         last_errors = None
-        raw = None
         for attempt in range(self.retries + 1):
             if attempt == 0:
                 content = self.client.complete(model, system, user)
@@ -317,13 +321,19 @@ class ModelGenerator:
                 user_request = str(obj["user_request"]).strip()
                 dsl = obj["dsl"]
             except (ValueError, KeyError, TypeError):
-                raw = content
                 last_errors = [("parse", "response was not the expected JSON object")]
-                continue
-            res = validate_dsl(dsl)
-            if res.ok and user_request:
-                return user_request, dsl, "model"
-            last_errors = res.errors or [("empty", "missing user_request")]
+                dsl = None
+            else:
+                res = validate_dsl(dsl)
+                if res.ok and user_request:
+                    return user_request, dsl, "model"
+                last_errors = res.errors or [("empty", "missing user_request")]
+
+            codes = ",".join(sorted({c for c, _ in last_errors}))
+            if attempt < self.retries:
+                self.log(f"    repair {attempt + 1}/{self.retries} {tag}: invalid [{codes}]")
+            else:
+                self.log(f"    gave up {tag} after {self.retries + 1} attempts: invalid [{codes}]")
 
         if self.on_fail == "fallback":
             return _template_user_request(spec), spec_to_dsl(spec), "fallback"
@@ -527,7 +537,7 @@ def run(args, log=lambda m: print(m, file=sys.stderr)):
         gen = ModelGenerator(client,
                              args.model_flash or cfg["flash"],
                              args.model_pro or cfg["pro"],
-                             args.pro_for, args.retries, args.on_fail)
+                             args.pro_for, args.retries, args.on_fail, log=log)
         log(f"provider={args.provider} flash={args.model_flash or cfg['flash']} "
             f"pro={args.model_pro or cfg['pro']}")
 
@@ -544,6 +554,7 @@ def run(args, log=lambda m: print(m, file=sys.stderr)):
     def write(row, to_val):
         f = val if to_val else train
         f.write(json.dumps(row) + "\n")
+        f.flush()  # land each row on disk immediately so Ctrl-C never loses progress
         stats["val" if to_val else "train"] += 1
 
     total_specs = len(specs)
@@ -686,7 +697,7 @@ def main(argv=None):
                     help="use the pro model on high-complexity specs (default) or never")
     ap.add_argument("--concurrency", type=int, default=5,
                     help="parallel API calls for prompt->DSL rows (forced to 1 for --provider none)")
-    ap.add_argument("--temperature", type=float, default=0.7)
+    ap.add_argument("--temperature", type=float, default=0.4)
     ap.add_argument("--max-tokens", type=int, default=1500)
     ap.add_argument("--retries", type=int, default=2, help="repair retries per spec on invalid DSL")
     ap.add_argument("--on-fail", choices=["skip", "fallback"], default="skip",
