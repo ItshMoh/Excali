@@ -103,7 +103,7 @@ the rest, so boxes don't overlap and arrows route cleanly.
 
 - **Live Space:** `https://huggingface.co/spaces/build-small-hackathon/excali-draw` 
 - **Source code:** `https://github.com/ItshMoh/Excali` 
-
+- **Demo Video:** `https://drive.google.com/drive/folders/1HzYcNPMHJa-1C_aB8V1GE4H-JtIdHG7X?usp=sharing`
 ---
 
 ##  Under the hood
