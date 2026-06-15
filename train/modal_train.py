@@ -209,10 +209,15 @@ def train(
         peft_config=peft_config,
     )
 
-    # Sanity check: confirm the mask actually fires on the first batch (labels
-    # should be -100 for the prompt and real token ids only for the DSL).
+    # Sanity check: peek at the first processed example. TRL's SFTTrainer
+    # tokenizes the dataset during construction and drops the raw "text"
+    # column, so handle both shapes (raw text vs. already-tokenized ids).
     sample = trainer.train_dataset[0]
-    print("sample text head:\n", sample["text"][:200])
+    if "text" in sample:
+        print("sample text head:\n", sample["text"][:200])
+    else:
+        print("sample text head:\n",
+              tokenizer.decode(sample["input_ids"][:120]))
 
     trainer.train()
 
